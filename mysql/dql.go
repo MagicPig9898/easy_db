@@ -78,3 +78,76 @@ func (c *Client) QueryMany(ctx context.Context, dest interface{}, query string, 
 	}
 	return nil
 }
+
+// QueryOne 执行单行查询并将结果扫描到目标结构体中，并完成自定义sql和参数
+// 参数:
+//   - ctx: 上下文
+//   - dest: 目标结构体指针
+//   - query: SQL查询语句
+//   - args: 查询参数
+//
+// 返回:
+//   - error: 查询过程中的错误，包括参数错误、数据库错误等
+//
+// 功能说明:
+//
+//	该方法支持将单行查询结果自动映射到结构体中。通过反射自动匹配
+//	数据库列名与结构体字段的 db 标签，实现灵活的结果集映射。
+func (c *Client) QueryOne(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+	// 参数检查
+	if dest == nil {
+		return &QueryError{Sql: query, Args: args, Err: errors.New("dest is nil")}
+	}
+	destVal := reflect.ValueOf(dest)
+	if destVal.Kind() != reflect.Ptr {
+		return &QueryError{Sql: query, Args: args, Err: errors.New("dest not pointer")}
+	}
+	structVal := destVal.Elem()
+	if structVal.Kind() != reflect.Struct {
+		return &QueryError{Sql: query, Args: args, Err: errors.New("dest not struct")}
+	}
+	// 执行查询
+	rows, err := c.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return &QueryError{Sql: query, Args: args, Err: err}
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return &QueryError{Sql: query, Args: args, Err: err}
+	}
+	if rows.Next() { // 只尝试获取一行
+		if err := c.scanRowToStruct(rows, columns, structVal); err != nil {
+			return &QueryError{Sql: query, Args: args, Err: err}
+		}
+		// 检查迭代过程中是否有错误
+		if err := rows.Err(); err != nil {
+			return &QueryError{Sql: query, Args: args, Err: err}
+		}
+	}
+	return &QueryError{Sql: query, Args: args, Err: errors.New("no data")}
+}
+
+// 命名传参
+// 参数:
+//   - ctx: 上下文
+//   - dest: 目标切片指针，必须是 *[]T 类型，其中 T 为结构体
+//   - query: SQL 查询语句，使用命名参数（如 :username, :id）
+//   - params: 参数结构体，字段通过 db 标签指定参数名
+//
+// 返回:
+//   - error: 查询过程中的错误，包括参数错误、数据库错误等
+//
+// 功能说明:
+//
+//	该方法支持将多行查询结果自动映射到结构体切片中，并使用命名参数。
+//	通过反射自动匹配数据库列名与结构体字段的 db 标签，实现灵活的结果集映射。
+//	命名参数语法为 :paramName，会自动替换为标准 SQL 的 ? 占位符。
+func (c *Client) QueryManyNamed(ctx context.Context, dest interface{}, query string, params interface{}) error {
+	// 将命名参数转换为位置参数
+	processedQuery, positionalArgs, err := processStructNamedParams(query, params)
+	if err != nil {
+		return &QueryError{Sql: query, Args: positionalArgs, Err: err}
+	}
+	return c.QueryMany(ctx, dest, processedQuery, positionalArgs...)
+}

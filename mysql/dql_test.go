@@ -38,3 +38,28 @@ func TestQueryMany(t *testing.T) {
 		t.Logf("user is %v", user)
 	}
 }
+
+// TestQueryManyNamed 测试使用命名参数查询多条记录
+func TestQueryManyNamed(t *testing.T) {
+	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "demo")
+	if err != nil {
+		t.Errorf("NewMysqlClient error: %v", err)
+	}
+	defer mysqlCli.Close()
+
+	query := `
+		SELECT *
+		FROM tb_user
+		WHERE age = :age limit 10
+	`
+	param := TestUser{
+		Age: 30,
+	}
+
+	ctx := context.Background()
+	users := []TestUser{}
+	err = mysqlCli.QueryManyNamed(ctx, &users, query, param)
+	if err != nil {
+		t.Errorf("QueryManyNamed failed, err : %v", err)
+	}
+}
