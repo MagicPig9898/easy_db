@@ -29,24 +29,11 @@ type Client struct {
 	config *Config
 }
 
-// ErrorCode 错误类型码
-type ErrorCode string
-
-const (
-	ErrorCodeDatabaseConnection ErrorCode = "DATABASE_CONNECTION" // 数据库连接错误
-	ErrorCodeDatabasePing       ErrorCode = "DATABASE_PING"       // 数据库ping错误
-	ErrorCodeQueryExecution     ErrorCode = "QUERY_EXECUTION"     // 查询执行错误
-	ErrorCodeInvalidParams      ErrorCode = "INVALID_PARAMS"      // 无效参数错误
-	ErrorCodeTransaction        ErrorCode = "TRANSACTION"         // 事务错误
-	ErrorCodeTimeout            ErrorCode = "TIMEOUT"             // 超时错误
-)
-
 // QueryError 错误类型
 type QueryError struct {
-	Sql     string
-	Args    []interface{}
-	Message ErrorCode
-	Err     error
+	Sql  string
+	Args []interface{}
+	Err  error
 }
 
 func (e *QueryError) Error() string {

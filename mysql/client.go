@@ -62,18 +62,16 @@ func NewMysqlClientWithConfig(config *Config) (*Client, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, &QueryError{
-			Sql:     "",
-			Message: ErrorCodeDatabaseConnection,
-			Err:     err,
+			Sql: "",
+			Err: err,
 		}
 	}
 
 	// 测试连接
 	if err = db.Ping(); err != nil {
 		return nil, &QueryError{
-			Sql:     "",
-			Message: ErrorCodeDatabasePing,
-			Err:     err,
+			Sql: "",
+			Err: err,
 		}
 	}
 
