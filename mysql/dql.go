@@ -125,7 +125,7 @@ func (c *Client) QueryOne(ctx context.Context, dest interface{}, query string, a
 			return &QueryError{Sql: query, Args: args, Err: err}
 		}
 	}
-	return &QueryError{Sql: query, Args: args, Err: errors.New("no data")}
+	return nil
 }
 
 // 命名传参

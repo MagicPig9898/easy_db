@@ -17,7 +17,7 @@ type TestUser struct {
 }
 
 func TestQueryMany(t *testing.T) {
-	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "demo")
+	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "lhs")
 	if err != nil {
 		t.Errorf("NewMysqlClient error: %v", err)
 	}
@@ -39,9 +39,30 @@ func TestQueryMany(t *testing.T) {
 	}
 }
 
+func TestQueryOne(t *testing.T) {
+	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "lhs")
+	if err != nil {
+		t.Errorf("NewMysqlClient error: %v", err)
+	}
+	defer mysqlCli.Close()
+
+	query := `
+		SELECT *
+		FROM tb_user
+		WHERE id = ? 
+	`
+	ctx := context.Background()
+	user := TestUser{}
+	err = mysqlCli.QueryOne(ctx, &user, query, 10036)
+	if err != nil {
+		t.Errorf("TestQueryOne failed, err : %v", err)
+	}
+	t.Logf("user is %v", user)
+}
+
 // TestQueryManyNamed 测试使用命名参数查询多条记录
 func TestQueryManyNamed(t *testing.T) {
-	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "demo")
+	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "lhs")
 	if err != nil {
 		t.Errorf("NewMysqlClient error: %v", err)
 	}
@@ -61,5 +82,8 @@ func TestQueryManyNamed(t *testing.T) {
 	err = mysqlCli.QueryManyNamed(ctx, &users, query, param)
 	if err != nil {
 		t.Errorf("QueryManyNamed failed, err : %v", err)
+	}
+	for _, user := range users {
+		t.Logf("user is %v", user)
 	}
 }
