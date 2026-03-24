@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 )
 
 // InsertOne 执行单条插入语句（INSERT）并校验只影响 1 行记录。
@@ -80,102 +79,198 @@ func (c *Client) InsertOneNamed(ctx context.Context, insertSql string, dest inte
 	return nil
 }
 
-// InsertManyNamed 批量执行命名参数插入。
-// 参数:
-//   - ctx: 上下文，用于控制超时、取消请求
-//   - insertSql: 使用命名参数的插入 SQL，例如 VALUES (:name, :age)
-//   - dest: 结构体切片指针（*[]T 或 *[]*T），每个元素代表一条待插入记录
+// InsertManyNamed 批量执行命名参数插入，采用“单 SQL 多值 + 分批 + 事务”策略。
+// 核心流程:
+// 1. 先将命名参数 SQL 转为位置参数 SQL，并提取 VALUES 的单行模板
+// 2. 按 batchSize 组装成 INSERT ... VALUES (...), (...), ... 批量语句
+// 3. 在同一事务中逐批执行，任一批失败立即回滚
 //
-// 返回:
-//   - error: 当参数不合法、任一条执行失败、或任一条影响行数不为 1 时返回错误
-//
-// 设计说明:
-//   - 使用事务保证批量插入的原子性：中间任一失败会回滚
-//   - 先用 goroutine 并发完成每条记录的命名参数解析，再进入事务执行写入
-//   - 每条记录都复用 InsertOneNamed 的参数解析规则（db tag 优先，否则蛇形小写）
+// 说明:
+//   - dest 要求是结构体切片指针（*[]T 或 *[]*T）
+//   - 字段取值规则与 InsertOneNamed 一致：优先 db tag，其次蛇形字段名
+//   - 每批执行后会校验 RowsAffected，确保写入条数符合预期
 func (c *Client) InsertManyNamed(ctx context.Context, insertSql string, dest interface{}) error {
 	if err := validateInsertSQL(insertSql); err != nil {
 		return &QueryError{Sql: insertSql, Err: err}
 	}
-
 	records, err := parseInsertManyDest(dest)
 	if err != nil {
 		return &QueryError{Sql: insertSql, Err: err}
 	}
-
-	type namedInsertPayload struct {
-		query string
-		args  []interface{}
+	// 用首条记录解析出“标准位置参数 SQL”与参数数量，后续批次复用该模板
+	singleSQL, firstArgs, err := processInsertStructNamedParams(insertSql, records[0])
+	if err != nil {
+		return &QueryError{Sql: insertSql, Args: firstArgs, Err: err}
 	}
-	payloads := make([]namedInsertPayload, len(records))
-	parseErrs := make(chan error, len(records))
-	var parseWg sync.WaitGroup
-	for i, record := range records {
-		parseWg.Add(1)
-		go func(idx int, rec interface{}) {
-			defer parseWg.Done()
-			processedQuery, positionalArgs, parseErr := processInsertStructNamedParams(insertSql, rec)
-			if parseErr != nil {
-				// 解析失败时，将错误发送到通道
-				parseErrs <- &QueryError{Sql: insertSql, Args: positionalArgs, Err: parseErr}
-				return
-			}
-			payloads[idx] = namedInsertPayload{ // 存储解析后的 SQL 和参数
-				query: processedQuery,
-				args:  positionalArgs,
-			}
-		}(i, record)
+	argsPerRecord := len(firstArgs)
+	if argsPerRecord == 0 {
+		return &QueryError{Sql: singleSQL, Err: fmt.Errorf("no positional args generated for insert")}
 	}
-	parseWg.Wait()
-	close(parseErrs)  // 关闭通道
-	for parseErr := range parseErrs {
-		if parseErr != nil {
-			return parseErr
-		}
+	// 将 INSERT SQL 拆成 prefix + tuple + suffix，便于拼接多值批量语句
+	prefix, tuple, suffix, err := splitInsertSQLTemplate(singleSQL)
+	if err != nil {
+		return &QueryError{Sql: singleSQL, Err: err}
 	}
-
+	// 事务保证批量写入的原子性：中途任一错误都会回滚
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return &QueryError{Sql: insertSql, Err: err}
 	}
-
 	successCount := 0
-	var successMu sync.Mutex
-	collectSuccess := func() {
-		successMu.Lock()
-		successCount++
-		successMu.Unlock()
-	}
-	getSuccessCount := func() int {
-		successMu.Lock()
-		defer successMu.Unlock()
-		return successCount
-	}
-
-	for _, payload := range payloads {
-		result, err := tx.ExecContext(ctx, payload.query, payload.args...)
+	const batchSize = 200
+	// 分批执行，控制单条 SQL 大小，避免语句过长或触发包大小限制
+	for start := 0; start < len(records); start += batchSize {
+		end := start + batchSize
+		if end > len(records) {
+			end = len(records)
+		}
+		currentBatchCount := end - start
+		currentBatchSQL := buildBatchInsertSQL(prefix, tuple, suffix, currentBatchCount)
+		currentBatchArgs := make([]interface{}, 0, argsPerRecord*currentBatchCount)
+		for i := start; i < end; i++ {
+			if i == 0 {
+				currentBatchArgs = append(currentBatchArgs, firstArgs...)
+				continue
+			}
+			processedQuery, positionalArgs, err := processInsertStructNamedParams(insertSql, records[i])
+			if err != nil {
+				_ = tx.Rollback()
+				return &QueryError{Sql: insertSql, Args: positionalArgs, Err: err}
+			}
+			if processedQuery != singleSQL {
+				_ = tx.Rollback()
+				return &QueryError{
+					Sql:  processedQuery,
+					Args: positionalArgs,
+					Err:  fmt.Errorf("processed insert sql mismatch in batch"),
+				}
+			}
+			if len(positionalArgs) != argsPerRecord {
+				_ = tx.Rollback()
+				return &QueryError{
+					Sql:  processedQuery,
+					Args: positionalArgs,
+					Err:  fmt.Errorf("args count mismatch in batch, expect %d got %d", argsPerRecord, len(positionalArgs)),
+				}
+			}
+			currentBatchArgs = append(currentBatchArgs, positionalArgs...)
+		}
+		// 一批只发一次 SQL，显著减少数据库往返次数
+		result, err := tx.ExecContext(ctx, currentBatchSQL, currentBatchArgs...)
 		if err != nil {
 			_ = tx.Rollback()
-			return &QueryError{Sql: payload.query, Args: payload.args, Err: err}
+			return &QueryError{Sql: currentBatchSQL, Args: currentBatchArgs, Err: err}
 		}
-
-		if err := validateSingleRowAffected(result); err != nil {
+		if err := validateExpectedRowsAffected(result, int64(currentBatchCount)); err != nil {
 			_ = tx.Rollback()
-			return &QueryError{Sql: payload.query, Args: payload.args, Err: err}
+			return &QueryError{Sql: currentBatchSQL, Args: currentBatchArgs, Err: err}
 		}
-		collectSuccess()
+		successCount += currentBatchCount
 	}
-
-	if getSuccessCount() != len(records) {
+	if successCount != len(records) {
 		_ = tx.Rollback()
 		return &QueryError{
 			Sql: insertSql,
-			Err: fmt.Errorf("insert many expect %d success, got %d", len(records), getSuccessCount()),
+			Err: fmt.Errorf("insert many expect %d success, got %d", len(records), successCount),
+		}
+	}
+	// 全部批次成功后统一提交事务
+	if err := tx.Commit(); err != nil {
+		return &QueryError{Sql: insertSql, Err: err}
+	}
+	return nil
+}
+
+func splitInsertSQLTemplate(insertSQL string) (string, string, string, error) {
+	lowerSQL := strings.ToLower(insertSQL)
+	valuesKeywordPos := strings.LastIndex(lowerSQL, "values")
+	if valuesKeywordPos == -1 {
+		return "", "", "", fmt.Errorf("insert sql must contain values keyword")
+	}
+
+	valuesBody := insertSQL[valuesKeywordPos+len("values"):]
+	tupleStartInValues := strings.Index(valuesBody, "(")
+	if tupleStartInValues == -1 {
+		return "", "", "", fmt.Errorf("insert sql values clause missing tuple")
+	}
+
+	tupleStartPos := valuesKeywordPos + len("values") + tupleStartInValues
+	tupleEndPos, err := findRightParenthesis(insertSQL, tupleStartPos)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	prefix := insertSQL[:tupleStartPos]
+	tuple := insertSQL[tupleStartPos : tupleEndPos+1]
+	suffix := insertSQL[tupleEndPos+1:]
+	return prefix, tuple, suffix, nil
+}
+
+func findRightParenthesis(s string, leftPos int) (int, error) {
+	depth := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
+
+	for i := leftPos; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\\' && i+1 < len(s) {
+			i++
+			continue
+		}
+
+		if !inDoubleQuote && !inBacktick && ch == '\'' {
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && !inBacktick && ch == '"' {
+			inDoubleQuote = !inDoubleQuote
+			continue
+		}
+		if !inSingleQuote && !inDoubleQuote && ch == '`' {
+			inBacktick = !inBacktick
+			continue
+		}
+		if inSingleQuote || inDoubleQuote || inBacktick {
+			continue
+		}
+
+		if ch == '(' {
+			depth++
+			continue
+		}
+		if ch == ')' {
+			depth--
+			if depth == 0 {
+				return i, nil
+			}
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return &QueryError{Sql: insertSql, Err: err}
+	return -1, fmt.Errorf("insert sql values tuple parenthesis not closed")
+}
+
+func buildBatchInsertSQL(prefix, tuple, suffix string, batchCount int) string {
+	var builder strings.Builder
+	builder.Grow(len(prefix) + len(tuple)*batchCount + len(suffix) + batchCount)
+	builder.WriteString(prefix)
+	for i := 0; i < batchCount; i++ {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString(tuple)
+	}
+	builder.WriteString(suffix)
+	return builder.String()
+}
+
+func validateExpectedRowsAffected(result sql.Result, expected int64) error {
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != expected {
+		return fmt.Errorf("expect %d rows affected, got %d", expected, rowsAffected)
 	}
 	return nil
 }
