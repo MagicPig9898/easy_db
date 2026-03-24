@@ -1,2 +1,2 @@
 # easy_db
-A simple and easy-to-use DB toolkit developed based on the Go language
+A simple and easy-to-use DB toolkit developed based on the Golang
