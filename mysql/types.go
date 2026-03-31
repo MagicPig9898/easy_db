@@ -21,6 +21,7 @@ type Config struct {
 	MaxOpenConns    int           // 最大打开连接数
 	MaxIdleConns    int           // 最大空闲连接数
 	ConnMaxLifetime time.Duration // 连接最大生命周期
+	AutoCreateTable bool          // 表不存在时是否根据结构体自动创建
 }
 
 // Client MySQL客户端

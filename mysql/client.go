@@ -36,6 +36,7 @@ func NewClient(host string, port int, username, password, database string) (*Cli
 		MaxOpenConns:    25,
 		MaxIdleConns:    10,
 		ConnMaxLifetime: time.Hour,
+		AutoCreateTable: true,
 	}
 
 	return NewMysqlClientWithConfig(config)

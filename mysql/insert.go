@@ -62,6 +62,11 @@ func (c *Client) InsertOneNamed(ctx context.Context, insertSql string, dest inte
 		return &QueryError{Sql: insertSql, Err: err}
 	}
 
+	// 插入前检查表是否存在，不存在且配置了自动建表则自动创建
+	if err := c.EnsureTableForInsert(ctx, insertSql, dest); err != nil {
+		return &QueryError{Sql: insertSql, Err: err}
+	}
+
 	processedQuery, positionalArgs, err := processInsertStructNamedParams(insertSql, dest)
 	if err != nil {
 		return &QueryError{Sql: insertSql, Args: positionalArgs, Err: err}
@@ -97,7 +102,13 @@ func (c *Client) InsertManyNamed(ctx context.Context, insertSql string, dest int
 	if err != nil {
 		return &QueryError{Sql: insertSql, Err: err}
 	}
-	// 用首条记录解析出“标准位置参数 SQL”与参数数量，后续批次复用该模板
+
+	// 批量插入前检查表是否存在，不存在且配置了自动建表则自动创建
+	if err := c.EnsureTableForInsert(ctx, insertSql, records[0]); err != nil {
+		return &QueryError{Sql: insertSql, Err: err}
+	}
+
+	// 用首条记录解析出"标准位置参数 SQL"与参数数量，后续批次复用该模板
 	singleSQL, firstArgs, err := processInsertStructNamedParams(insertSql, records[0])
 	if err != nil {
 		return &QueryError{Sql: insertSql, Args: firstArgs, Err: err}

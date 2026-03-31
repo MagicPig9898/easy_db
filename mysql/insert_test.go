@@ -13,7 +13,7 @@ type InsertOneNamedUserParam struct {
 	Age     int    `db:"age"`
 	Sex     int    `db:"sex"`
 	Email   string `db:"email"`
-	Phone   string `db:"-"`
+	Phone   string `db:"phone"`
 	Address string `db:"address"`
 }
 
@@ -57,7 +57,7 @@ func TestInsertOne(t *testing.T) {
 }
 
 func TestInsertOneNamed(t *testing.T) {
-	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "lhs")
+	mysqlCli, err := NewClient("localhost", 3306, "root", "123456", "test")
 	if err != nil {
 		t.Errorf("NewMysqlClient error: %v", err)
 	}
