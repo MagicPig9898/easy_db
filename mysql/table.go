@@ -103,12 +103,108 @@ func goTypeToMySQLType(t reflect.Type) string {
 	}
 }
 
+func parseDBColumnAndOptions(dbTag, fieldName string) (string, map[string]struct{}, bool) {
+	if dbTag == "-" {
+		return "", nil, true
+	}
+	if dbTag == "" {
+		return toSnakeCase(fieldName), nil, false
+	}
+
+	parts := strings.Split(dbTag, ",")
+	colName := strings.TrimSpace(parts[0])
+	if colName == "" {
+		colName = toSnakeCase(fieldName)
+	}
+
+	options := make(map[string]struct{})
+	for _, part := range parts[1:] {
+		opt := strings.ToLower(strings.TrimSpace(part))
+		if opt == "" {
+			continue
+		}
+		options[opt] = struct{}{}
+	}
+
+	return colName, options, false
+}
+
+func isIntegerType(t reflect.Type) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasAutoIncrementOption(options map[string]struct{}) bool {
+	if len(options) == 0 {
+		return false
+	}
+
+	if _, ok := options["auto_increment"]; ok {
+		return true
+	}
+	if _, ok := options["autoincrement"]; ok {
+		return true
+	}
+	return false
+}
+
+func isTruthyAutoIncrementTag(v string) bool {
+	s := strings.TrimSpace(strings.ToLower(v))
+	if s == "" {
+		return false
+	}
+	switch s {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+func hasAutoIncrementTag(field reflect.StructField, dbTagOptions map[string]struct{}) bool {
+	if hasAutoIncrementOption(dbTagOptions) {
+		return true
+	}
+
+	if isTruthyAutoIncrementTag(field.Tag.Get("auto_increment")) {
+		return true
+	}
+	if isTruthyAutoIncrementTag(field.Tag.Get("autoincrement")) {
+		return true
+	}
+	if isTruthyAutoIncrementTag(field.Tag.Get("autoIncrement")) {
+		return true
+	}
+
+	mysqlTag := field.Tag.Get("mysql")
+	if mysqlTag == "" {
+		return false
+	}
+	parts := strings.Split(mysqlTag, ",")
+	for _, part := range parts {
+		opt := strings.ToLower(strings.TrimSpace(part))
+		if opt == "auto_increment" || opt == "autoincrement" {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateTableFromStruct 根据结构体定义自动创建表
 // 规则：
 //   - 字段名取 db tag，无 tag 则蛇形转换
 //   - db:"-" 的字段跳过
 //   - 未导出字段跳过
-//   - 名为 "id" 的字段自动设为 PRIMARY KEY
+//   - 名为 "id" 的字段自动设为 PRIMARY KEY，同时如果 "id" 字段是整数类型，且有 AUTO_INCREMENT 标签，自动设为 AUTO_INCREMENT
 func (c *Client) CreateTableFromStruct(ctx context.Context, tableName string, dest interface{}) error {
 	structVal := reflect.ValueOf(dest)
 	if structVal.Kind() == reflect.Ptr {
@@ -129,12 +225,9 @@ func (c *Client) CreateTableFromStruct(ctx context.Context, tableName string, de
 			continue
 		}
 
-		colName := field.Tag.Get("db")
-		if colName == "-" {
+		colName, dbTagOptions, skip := parseDBColumnAndOptions(field.Tag.Get("db"), field.Name)
+		if skip {
 			continue
-		}
-		if colName == "" {
-			colName = toSnakeCase(field.Name)
 		}
 
 		mysqlType := goTypeToMySQLType(field.Type)
@@ -144,6 +237,9 @@ func (c *Client) CreateTableFromStruct(ctx context.Context, tableName string, de
 		if colName == "id" {
 			primaryKey = colName
 			colDef += " NOT NULL"
+			if isIntegerType(field.Type) && hasAutoIncrementTag(field, dbTagOptions) {
+				colDef += " AUTO_INCREMENT"
+			}
 		}
 
 		columns = append(columns, colDef)
